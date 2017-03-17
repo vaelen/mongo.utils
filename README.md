@@ -1,5 +1,5 @@
 # Mongo.Utils
-A set of MongoDB utilities written in Go
+A set of MongoDB utilities written in Go.  These applications are not officially supported by MongoDB.
 
 ## connectToMongoDB
 
