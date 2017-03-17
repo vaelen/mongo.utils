@@ -22,9 +22,11 @@ import (
 )
 
 type Chunk struct {
+	Id string "_id"
 	NS string "ns"
 	Min bson.D "min"
 	Max bson.D "max"
+	Shard string "shard"
 }
 
 type Collection struct {
@@ -50,15 +52,6 @@ func Shards(session *mgo.Session) ([]Shard, error) {
 	return results, nil
 }
 
-func Chunks(session *mgo.Session) ([]Chunk, error) {
-	results := make([]Chunk, 0)
-	err := session.DB("config").C("chunks").Find(bson.M{}).All(&results)
-	if err != nil {
-		return nil, err
-	}
-	return results, nil
-}
-
 func Collections(session *mgo.Session) ([]Collection, error) {
 	results := make([]Collection, 0)
 	err := session.DB("config").C("collections").Find(bson.M{}).All(&results)
@@ -68,8 +61,39 @@ func Collections(session *mgo.Session) ([]Collection, error) {
 	return results, nil
 }
 
-
+func Chunks(session *mgo.Session) ([]Chunk, error) {
+	return ChunksForQuery(session, bson.M{})
+}
 
 func ChunksIter(session *mgo.Session) *mgo.Iter {
+	return ChunksIterForQuery(session, bson.M{})
+}
+
+func ChunksForQuery(session *mgo.Session, query interface{}) ([]Chunk, error) {
+	results := make([]Chunk, 0)
+	err := session.DB("config").C("chunks").Find(query).All(&results)
+	if err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
+func ChunksIterForQuery(session *mgo.Session, query interface{}) *mgo.Iter {
 	return session.DB("config").C("chunks").Find(bson.M{}).Iter()
+}
+
+func ChunksForNS(session *mgo.Session, ns string) ([]Chunk, error) {
+	return ChunksForQuery(session, bson.M{"ns": ns})
+}
+
+func ChunksIterForNS(session *mgo.Session, ns string) *mgo.Iter {
+	return ChunksIterForQuery(session, bson.M{"ns": ns})
+}
+
+func ChunksForNSAndShard(session *mgo.Session, ns string, shard string) ([]Chunk, error) {
+	return ChunksForQuery(session, bson.M{"ns": ns, "shard": shard})
+}
+
+func ChunksIterForNSAndShard(session *mgo.Session, ns string, shard string) *mgo.Iter {
+	return ChunksIterForQuery(session, bson.M{"ns": ns, "shard": shard})
 }
