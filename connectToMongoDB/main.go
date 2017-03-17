@@ -39,10 +39,15 @@ func main() {
 
 	log.Printf("Connecting to host(s): %v\n", dialInfo.Addrs)
 	
-	mongosSession, err := mgo.DialWithInfo(dialInfo)
+	session, err := mgo.DialWithInfo(dialInfo)
 	if err != nil {
 		log.Fatalf("Could not connect to MongoDB instance: %s\n", err.Error())
 	}
-	defer mongosSession.Close()
+	defer session.Close()
+
+	err = session.Ping()
+	if err != nil {
+		log.Fatalf("Could not execute ping() on MongoDB instance: %s\n", err.Error())
+	}
 	log.Println("Successfully connected")
 }
