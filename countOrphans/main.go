@@ -21,28 +21,9 @@ import (
 	"strings"
 	"time"
 	"gopkg.in/mgo.v2"
-	"gopkg.in/mgo.v2/bson"
+	// "gopkg.in/mgo.v2/bson"
+	"github.com/vaelen/mongo.utils/sharding"
 )
-
-type Chunk struct {
-	NS string "ns"
-	Min bson.D "min"
-	Max bson.D "max"
-}
-
-type Collection struct {
-	NS string "_id"
-	Dropped bool
-	Unique bool
-	Key bson.D
-}
-
-type Shard struct {
-	Name string "_id"
-	Host string
-	State int
-	Tags []string
-}
 
 func main() {
 	url := "mongodb://localhost:30000"
@@ -57,11 +38,9 @@ func main() {
 	}
 	defer mongosSession.Close()
 
-	configDb := mongosSession.DB("config")
-
-	shards, err := GetShards(mongosSession)
+	shards, err := sharding.Shards(mongosSession)
 	if err != nil {
-		log.Fatalf("Could not determine the list of available shards: %s\n", err.Error())
+		log.Fatalf("Could not retrieve the list of available shards: %s\n", err.Error())
 	}
 
 	shardSessions := make(map[string]*mgo.Session)
@@ -87,9 +66,10 @@ func main() {
 		shardSessions[shard.Name] = s
 	}
 	
-	collections := make([]Collection,0)
-	configDb.C("collections").Find(bson.M{"dropped": false}).All(&collections)
-
+	collections, err := sharding.Collections(mongosSession)
+	if err != nil {
+		log.Fatalf("Could not retrieve the list of available collections: %s\n", err.Error())
+	}
 	for _, c := range collections {
 		_, _, err := CountOrphans(mongosSession, shardSessions, c.NS)
 		if err != nil {
@@ -126,24 +106,3 @@ func CountDocumentsOnShard(session *mgo.Session, dbName string, colName string) 
 	return db.C(colName).Count()
 }
 
-func GetShards(session *mgo.Session) ([]Shard, error) {
-	results := make([]Shard, 0)
-	configDb := session.DB("config")
-	err := configDb.C("shards").Find(bson.M{}).All(&results)
-	if err != nil {
-		return nil, err
-	}
-	return results, nil
-}
-
-func ListChunks(configDb *mgo.Database) {
-	iter := configDb.C("chunks").Find(bson.M{}).Iter()
-	chunk := Chunk{}
-	for iter.Next(&chunk) {
-		log.Println("Chunk:", chunk)
-	}
-	
-	if err := iter.Close(); err != nil {
-		log.Fatal(err)
-	}
-}
