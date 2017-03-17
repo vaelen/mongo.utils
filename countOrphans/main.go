@@ -20,11 +20,14 @@ import (
 	"os"
 	"log"
 	"strings"
+	"sort"
 	"time"
 	"gopkg.in/mgo.v2"
 	"gopkg.in/mgo.v2/bson"
 	"github.com/vaelen/mongo.utils/sharding"
 )
+
+const UseSimpleCount = true
 
 func main() {
 	url := "mongodb://localhost"
@@ -37,6 +40,7 @@ func main() {
 	}
 
 	SimpleCount(dialInfo)
+	//AdvancedCount(dialInfo)
 	
 }
 
@@ -70,7 +74,6 @@ func SimpleCount(dialInfo *mgo.DialInfo) {
 	}
 }
 
-// NOTE: This doesn't work properly yet
 func AdvancedCount(dialInfo *mgo.DialInfo) {
 	mongosSession, err := mgo.DialWithInfo(dialInfo)
 	if err != nil {
@@ -111,30 +114,43 @@ func AdvancedCount(dialInfo *mgo.DialInfo) {
 	for _, c := range collections {
 		log.Printf("Looking for Orphans.  DB Name: %s\n", c.NS);
 
-		totalCount, m, err := CountOrphans(mongosSession, shardSessions, c.NS)
+		mongosResults, results, err := CountOrphans(mongosSession, shardSessions, c.NS)
 		if err != nil {
 			log.Fatalf("Error Counting Orphans for %s: %s\n", c.NS, err.Error())
 		}
-		log.Printf("DB Name: %s, Document Count: %d\n", c.NS, totalCount)
-		for n, oc := range m {
+		log.Printf("DB Name: %s, Document Count: %d, Actual: %d, Orphans: %d\n",
+			c.NS, mongosResults.DocCount, mongosResults.ActualDocCount, mongosResults.Orphans())
+		for _, shardName := range sortedKeys(results) {
+			oc := results[shardName]
 			log.Printf("DB Name: %s, Shard: %s, Document Count: %d, Actual: %d, Orphans: %d\n",
-				c.NS, n, oc.Docs, oc.RealDocs, oc.Orphans())
+				c.NS, shardName, oc.DocCount, oc.ActualDocCount, oc.Orphans())
 		}
 	}
 }
 
+func sortedKeys(m map[string]OrphanCount) []string {
+	keys := make([]string, 0, len(m))
+	for key,_ := range m {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 type OrphanCount struct {
-	Docs int
-	RealDocs int
+	Shard string
+	DocCount int
+	ActualDocCount int
+	Error error
 }
 
 func (oc OrphanCount) HasOrphans() bool {
-	return oc.RealDocs > oc.Docs
+	return oc.DocCount > oc.ActualDocCount
 }
 
 func (oc OrphanCount) Orphans() int {
 	if oc.HasOrphans() {
-		return oc.RealDocs - oc.Docs
+		return oc.DocCount - oc.ActualDocCount
 	}
 	return 0
 }
@@ -144,37 +160,60 @@ func SplitNS(ns string) (string, string) {
 	return nsSplice[0], nsSplice[1]
 }	
 
-func CountOrphans(mongosSession *mgo.Session, shardSessions map[string]*mgo.Session, ns string) (int, map[string]OrphanCount, error) {
-	m := make(map[string]OrphanCount)
-	c, err := CountRealDocumentsOnShard(mongosSession, ns)
+func CountOrphans(mongosSession *mgo.Session, shardSessions map[string]*mgo.Session, ns string) (OrphanCount, map[string]OrphanCount, error) {
+	results := make(map[string]OrphanCount)
+	messages := make(chan OrphanCount, len(shardSessions))
+	count, err := CountDocumentsOnShard(mongosSession, ns)
 	if err != nil {
-		return -1, nil, err
+		return OrphanCount{}, nil, err
 	}
-	for n, s := range shardSessions {
-		shardCount, err := CountOrphansOnShard(mongosSession, s, ns, n)
-		if err != nil {
-			return -1, nil, err
+	actualCount, err := CountRealDocumentsOnShard(mongosSession, ns)
+	if err != nil {
+		return OrphanCount{}, nil, err
+	}
+	for shardName, shardSession := range shardSessions {
+		go countOrphansOnShardWorker(mongosSession, shardSession, ns, shardName, messages)
+	}
+	for i := 0; i < len(shardSessions); i++ {
+		oc := <-messages
+		if oc.Error != nil {
+			return OrphanCount{}, nil, oc.Error
 		}
-		m[n] = shardCount
+		results[oc.Shard] = oc
 	}
-	return c, m, nil
+
+	return OrphanCount{DocCount: count, ActualDocCount: actualCount}, results, nil
 }
 
+func countOrphansOnShardWorker(mongosSession *mgo.Session, shardSession *mgo.Session, ns string, shardName string, messages chan<- OrphanCount) {
+	// log.Printf("Starting: %s", shardName)
+	messages <- CountOrphansOnShard(mongosSession, shardSession, ns, shardName)
+	// log.Printf("Finishing: %s", shardName)	
+}
 
-func CountOrphansOnShard(mongos *mgo.Session, shard *mgo.Session, ns string, shardName string) (OrphanCount, error){
-	count, err := CountDocumentsOnShard(shard, ns)
+func CountOrphansOnShard(mongos *mgo.Session, shard *mgo.Session, ns string, shardName string) OrphanCount {
+	var err error
+	var actualCount int
+	
+	if UseSimpleCount {
+		actualCount, err = CountRealDocumentsOnShard(shard, ns)
+	} else {
+		// NOTE: This doesn't work properly yet
+		actualCount, err = CountChunkDocumentsOnShard(mongos, shard, ns, shardName)
+	}
 	if err != nil {
-		return OrphanCount{}, err
+		return OrphanCount{Shard: shardName, Error: err}
 	}
 	
-	realCount, err := CountRealDocumentsOnShard(shard, ns)
+	count, err := CountDocumentsOnShard(shard, ns)
 	if err != nil {
-		return OrphanCount{}, err
+		return OrphanCount{Shard: shardName, Error: err}
 	}
 
-	return OrphanCount{Docs: count, RealDocs: realCount}, nil
+	return OrphanCount{Shard: shardName, DocCount: count, ActualDocCount: actualCount}
 }
 
+// NOTE: This doesn't work properly yet
 func CountChunkDocumentsOnShard(mongos *mgo.Session, shard *mgo.Session, ns string, shardName string) (int, error) {
 	dbName, colName := SplitNS(ns)
 	chunks, err := sharding.ChunksForNSAndShard(mongos, ns, shardName)
@@ -194,7 +233,7 @@ func CountChunkDocumentsOnShard(mongos *mgo.Session, shard *mgo.Session, ns stri
 		for key, minValue := range min {
 			maxValue := max[key]
 			qMin := bson.DocElem{ Name: "$gte", Value: minValue }
-			qMax := bson.DocElem{ Name: "$lt", Value: maxValue }
+			qMax := bson.DocElem{ Name: "$lte", Value: maxValue }
 			qv := bson.D { qMin, qMax }
 			q = append(q, bson.DocElem{ Name: key, Value: qv })
 		}
