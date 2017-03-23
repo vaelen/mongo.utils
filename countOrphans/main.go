@@ -27,7 +27,7 @@ import (
 	"github.com/vaelen/mongo.utils/sharding"
 )
 
-const UseSimpleCount = true
+const UseSimpleCount = false
 
 func main() {
 	url := "mongodb://localhost"
@@ -39,8 +39,8 @@ func main() {
 		log.Fatalf("Could not parse MongoDB URL: %s\n", err.Error())
 	}
 
-	SimpleCount(dialInfo)
-	//AdvancedCount(dialInfo)
+	//SimpleCount(dialInfo)
+	AdvancedCount(dialInfo)
 	
 }
 
@@ -96,7 +96,7 @@ func AdvancedCount(dialInfo *mgo.DialInfo) {
 		*shardDialInfo = *dialInfo
 		shardDialInfo.Addrs = addrs
 		if shardDialInfo.Timeout == 0 {
-			shardDialInfo.Timeout = 2 * time.Second
+			shardDialInfo.Timeout = 10 * time.Second
 		}
 		log.Printf("Connecting to %s (%s)\n", shard.Name, shard.Host)
 		s, err := mgo.DialWithInfo(shardDialInfo)
@@ -213,7 +213,7 @@ func CountOrphansOnShard(mongos *mgo.Session, shard *mgo.Session, ns string, sha
 	return OrphanCount{Shard: shardName, DocCount: count, ActualDocCount: actualCount}
 }
 
-// NOTE: This doesn't work properly yet
+// NOTE: This probably works now.  I still need to verify some corner cases.
 func CountChunkDocumentsOnShard(mongos *mgo.Session, shard *mgo.Session, ns string, shardName string) (int, error) {
 	dbName, colName := SplitNS(ns)
 	chunks, err := sharding.ChunksForNSAndShard(mongos, ns, shardName)
@@ -221,23 +221,30 @@ func CountChunkDocumentsOnShard(mongos *mgo.Session, shard *mgo.Session, ns stri
 		return -1, err
 	}
 	counts := make([]int, 0, len(chunks))
-	scounts := make([]int, 0, len(chunks))
-	log.Printf("Shard: %s, Chunks: %d\n", shardName, len(chunks))
+	// scounts := make([]int, 0, len(chunks))
+	// log.Printf("Shard: %s, Chunks: %d\n", shardName, len(chunks))
 	for _, chunk := range chunks {
-		q := bson.D{}
-
-		min := chunk.Min.Map()
-		max := chunk.Max.Map()
+		var minQuery, maxQuery []bson.D
 		
 		// Build a query that includes chunk.Min and excludes chunk.Max
-		for key, minValue := range min {
-			maxValue := max[key]
-			qMin := bson.DocElem{ Name: "$gte", Value: minValue }
-			qMax := bson.DocElem{ Name: "$lte", Value: maxValue }
-			qv := bson.D { qMin, qMax }
-			q = append(q, bson.DocElem{ Name: key, Value: qv })
+		minQuery, err = buildChunkClause(chunk.Min, "$gt", "$gte", bson.D{})
+		if err != nil {
+			return -1, err
 		}
 
+		maxQuery, err = buildChunkClause(chunk.Max, "$lt", "$lt", bson.D{})
+		if err != nil {
+			return -1, err
+		}
+
+		queries := make([]bson.M, 2)
+		queries[0] = bson.M { "$or": minQuery }
+		queries[1] = bson.M { "$or": maxQuery }
+		
+		q := bson.M{ "$and": queries }
+
+		//log.Printf("Query: %v\n", q)
+		
 		c, err := shard.DB(dbName).C(colName).Find(q).Count()
 		if err != nil {
 			return -1, err
@@ -246,21 +253,63 @@ func CountChunkDocumentsOnShard(mongos *mgo.Session, shard *mgo.Session, ns stri
 		counts = append(counts, c)
 		//log.Printf("Shard: %s, Chunk Count: %d, Total Count: %d\n", shardName, c, count)
 
+		/*
 		sc, err := mongos.DB(dbName).C(colName).Find(q).Count()
 		if err != nil {
 			return -1, err
 		}
 
 		scounts = append(scounts, sc)
+        */
 	}
-	//log.Printf("Counts: %v\n", counts)
 	totalCount := sum(counts)
-	log.Printf("%s Total Count: %d\n", shardName, totalCount)
-	//log.Printf("mongos Counts: %v\n", scounts)
+	// log.Printf("%s Total Count: %d\n", shardName, totalCount)
+
+	/*
 	totalSCount := sum(scounts)
 	log.Printf("mongos Total Count: %d\n", totalSCount)
+    */
 
 	return totalCount, nil
+}
+
+func buildChunkClause(fields bson.D, op string, leafOp string, prevFields bson.D) ([]bson.D, error) {
+	if len(fields) == 0 {
+		return nil, nil
+	}
+
+	// Get the next field off the list of fields
+	field := fields[0]
+	fields = fields[1:]
+
+	if len(fields) == 0 {
+		// No more fields after this one
+		op = leafOp
+	}
+	
+	// This is our computed clause: { ..., x: { $gt: 1 } }
+	clause := append(prevFields, bson.DocElem{Name: field.Name, Value: bson.M{op: field.Value}})
+	// This is used to build the next clause: { ..., x: 1 }
+	nextFields := append(prevFields, field)
+
+	// Build the next clause if there is one
+	nextClause, err := buildChunkClause(fields, op, leafOp, nextFields)
+	if err != nil {
+		return nil, nil
+	}
+
+	// Build our return value
+	
+	clauses := make([]bson.D,1)
+	clauses[0] = clause
+	
+	if nextClause != nil {
+		for _, c := range nextClause {
+			clauses = append(clauses, c)
+		}
+	}
+
+	return clauses, nil
 }
 
 func sum(counts []int) int {
