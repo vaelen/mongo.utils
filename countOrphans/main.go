@@ -17,6 +17,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"log"
 	"strings"
@@ -88,9 +89,11 @@ func AdvancedCount(dialInfo *mgo.DialInfo) {
 
 	shardSessions := make(map[string]*mgo.Session)
 	for _, shard := range shards {
-		shardDialInfo, err := mgo.ParseURL(shard.Host)
+		replSetName, replSetHost := parseHost(shard.Host)
+		replSetUrl := fmt.Sprintf("mongodb://%s/?replicaSet=%s", replSetHost, replSetName)
+		shardDialInfo, err := mgo.ParseURL(replSetUrl)
 		if err != nil {
-			log.Fatalf("Could not parse shard URL (%s): %s\n", shard.Host, err.Error())
+			log.Fatalf("Could not parse shard URL (%s): %s\n", replSetUrl, err.Error())
 		}
 		addrs := shardDialInfo.Addrs
 		*shardDialInfo = *dialInfo
@@ -128,6 +131,11 @@ func AdvancedCount(dialInfo *mgo.DialInfo) {
 	}
 }
 
+func parseHost(host string) (string,string) {
+	parts := strings.SplitN(host, "/", 2)
+	return parts[0], parts[1]
+}
+
 func sortedKeys(m map[string]OrphanCount) []string {
 	keys := make([]string, 0, len(m))
 	for key,_ := range m {
@@ -158,7 +166,7 @@ func (oc OrphanCount) Orphans() int {
 func SplitNS(ns string) (string, string) {
 	nsSplice := strings.SplitN(ns, ".", 2)
 	return nsSplice[0], nsSplice[1]
-}	
+}
 
 func CountOrphans(mongosSession *mgo.Session, shardSessions map[string]*mgo.Session, ns string) (OrphanCount, map[string]OrphanCount, error) {
 	results := make(map[string]OrphanCount)
